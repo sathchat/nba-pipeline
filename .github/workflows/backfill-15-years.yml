@@ -1,0 +1,101 @@
+name: Backfill last 15 NBA seasons to Kaggle
+
+on:
+  workflow_dispatch: {}         # manual trigger only (run once to seed history)
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240        # give it up to 4 hours
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python setup
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          set -euxo pipefail
+          python -m pip install -U pip
+          pip install -r requirements.txt
+          pip install kaggle
+
+      - name: Configure Kaggle CLI credentials
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          set -euxo pipefail
+          mkdir -p ~/.kaggle
+          printf '{"username":"%s","key":"%s"}\n' "$KAGGLE_USERNAME" "$KAGGLE_KEY" > ~/.kaggle/kaggle.json
+          chmod 600 ~/.kaggle/kaggle.json
+          kaggle --version
+
+      - name: Prepare export folder and (if present) load latest CSVs from Kaggle
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        run: |
+          set -euxo pipefail
+          mkdir -p export
+          DS="${KAGGLE_USERNAME}/nba-daily-updates"
+          if kaggle datasets status "$DS" >/dev/null 2>&1; then
+            echo "Dataset exists; downloading current CSVs to merge…"
+            rm -rf prev && mkdir -p prev
+            kaggle datasets download -d "$DS" -p prev --unzip
+            # copy over previous CSVs if they exist
+            [ -f prev/export/games.csv ] && cp -f prev/export/games.csv export/games.csv || true
+            [ -f prev/export/player_stats.csv ] && cp -f prev/export/player_stats.csv export/player_stats.csv || true
+          fi
+          # seed headers if still missing (first-ever run)
+          python - <<'PY'
+          import os, csv
+          os.makedirs('export', exist_ok=True)
+          def ensure(path, cols):
+              if not os.path.exists(path):
+                  with open(path,'w',newline='',encoding='utf-8') as f:
+                      csv.writer(f).writerow(cols)
+          games_cols = ["gameId","gameCode","gameDateEt","gameStatusText","period","gameClock","arenaName",
+                        "homeTeamId","homeTeamTricode","homeScore","awayTeamId","awayTeamTricode","awayScore"]
+          players_cols = ["gameId","playerId","teamId","teamTricode","firstName","familyName","jerseyNum","position",
+                          "minutes","points","reboundsTotal","assists","steals","blocks","turnovers",
+                          "fieldGoalsMade","fieldGoalsAttempted","threePointersMade","threePointersAttempted",
+                          "freeThrowsMade","freeThrowsAttempted","plusMinus","didNotPlay","notPlayingReason"]
+          ensure('export/games.csv', games_cols)
+          ensure('export/player_stats.csv', players_cols)
+          PY
+
+      - name: Compile Python (fast sanity check)
+        run: python -m compileall -q src
+
+      - name: Backfill seasons (2010–2011 … 2024–2025) with checkpoints
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        run: |
+          set -euxo pipefail
+          DS="${KAGGLE_USERNAME}/nba-daily-updates"
+          COUNT=0
+          for YEAR in $(seq 2010 2024); do
+            START="${YEAR}-10-01"
+            NEXT=$((YEAR+1))
+            END="${NEXT}-07-01"
+            echo "=== Processing season ${YEAR}-${NEXT} (${START}..${END}) ==="
+            START_DATE="$START" END_DATE="$END" python src/ingest.py
+            COUNT=$((COUNT+1))
+            # checkpoint every 3 seasons so progress is persisted
+            if [ $((COUNT % 3)) -eq 0 ]; then
+              echo "Checkpointing to Kaggle after season ${YEAR}-${NEXT}…"
+              kaggle datasets status "$DS" >/dev/null 2>&1 && \
+                kaggle datasets version -p . -m "Backfill checkpoint through ${YEAR}-${NEXT}" -r zip --dir-mode zip \
+              || kaggle datasets create -p .
+            fi
+          done
+          echo "Finalizing backfill with a full version…"
+          kaggle datasets version -p . -m "Backfill complete: last 15 seasons" -r zip --dir-mode zip
+
+      - name: Show Kaggle dataset URL
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        run: echo "https://www.kaggle.com/datasets/$KAGGLE_USERNAME/nba-daily-updates"
