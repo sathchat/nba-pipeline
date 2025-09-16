@@ -1,0 +1,18 @@
+{
+  "title": "NBA Daily Updates",
+  "id": "sathchat/nba-daily-updates",
+  "licenses": [
+    { "name": "CC0-1.0" }
+  ],
+  "description": "Daily-updated NBA games and player box scores collected via public NBA JSON endpoints. Files are maintained by a GitHub Actions workflow at 12:00 UTC (08:00 ET).",
+  "resources": [
+    {
+      "path": "export/games.csv",
+      "description": "Per-game scoreboard lines (home/away, scores, time, arena)."
+    },
+    {
+      "path": "export/player_stats.csv",
+      "description": "Per-player box score lines for each game."
+    }
+  ]
+}
