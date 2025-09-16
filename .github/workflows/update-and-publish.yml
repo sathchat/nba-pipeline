@@ -26,35 +26,13 @@ jobs:
           pip install -r requirements.txt
           pip install kaggle
 
-      - name: Create export folder (if missing)
-        run: mkdir -p export
-
-      - name: Ingest latest NBA data (yesterday + today)
-        env:
-          USE_PARQUET: "0"     # set "1" to also write Parquet mirrors
+      - name: Seed empty CSVs if missing (avoids first-run Kaggle errors)
         run: |
-          python src/ingest.py
-          echo "Preview export files:"
-          ls -lh export || true
-
-      - name: Prepare Kaggle metadata at repo root
-        run: |
-          echo "Using dataset-metadata.json at repo root"
-
-      - name: Publish to Kaggle (create-or-version)
-        env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-        run: |
-          set -e
-          # Try to version the dataset first; if it doesn't exist, create it
-          if kaggle datasets status sathchat/nba-daily-updates > /dev/null 2>&1; then
-            echo "Dataset exists; creating new version..."
-            kaggle datasets version -p . -m "Daily update" -r zip --dir-mode zip
-          else
-            echo "Dataset does not exist; creating..."
-            kaggle datasets create -p .
-          fi
-
-      - name: Show Kaggle dataset URL
-        run: echo "https://www.kaggle.com/datasets/sathchat/nba-daily-updates"
+          python - <<'PY'
+          import os, csv
+          os.makedirs('export', exist_ok=True)
+          def ensure(path, cols):
+              if not os.path.exists(path):
+                  with open(path,'w',newline='',encoding='utf-8') as f:
+                      csv.writer(f).writerow(cols)
+          games_cols = ["gameId","gameCode","gameDateEt","gameStatusT]()_
