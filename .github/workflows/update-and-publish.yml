@@ -1,74 +1,32 @@
-name: Update NBA dataset and publish to Kaggle (debug)
+name: Update NBA dataset and publish to Kaggle
 
 on:
-  workflow_dispatch: {}
   schedule:
-    - cron: "0 12 * * *"   # 12:00 UTC daily
+    - cron: "0 12 * * *"    # 12:00 UTC daily (8:00 AM America/New_York)
+  workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+
     steps:
-      - name: Checkout
+      - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Python setup
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install Python dependencies
         run: |
           set -euxo pipefail
           python -m pip install -U pip
           pip install -r requirements.txt
           pip install kaggle
 
-      - name: Print versions
-        run: |
-          set -euxo pipefail
-          python --version
-          pip --version
-
-      - name: Validate required files exist
-        run: |
-          set -euxo pipefail
-          test -f dataset-metadata.json
-          test -f src/ingest.py
-          mkdir -p export
-          echo "Repo tree:"
-          ls -la
-          echo "dataset-metadata.json:"
-          cat dataset-metadata.json
-
-      - name: Check Kaggle secrets present (length only)
-        env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-        run: |
-          set -euxo pipefail
-          if [ -z "${KAGGLE_USERNAME:-}" ] || [ -z "${KAGGLE_KEY:-}" ]; then
-            echo "ERROR: KAGGLE_USERNAME or KAGGLE_KEY secret is missing." >&2
-            exit 1
-          fi
-          echo "KAGGLE_USERNAME length: ${#KAGGLE_USERNAME}"
-          echo "KAGGLE_KEY length: ${#KAGGLE_KEY}"
-
-      - name: Configure Kaggle CLI credentials
-        env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-        run: |
-          set -euxo pipefail
-          mkdir -p ~/.kaggle
-          printf '{"username":"%s","key":"%s"}\n' "$KAGGLE_USERNAME" "$KAGGLE_KEY" > ~/.kaggle/kaggle.json
-          chmod 600 ~/.kaggle/kaggle.json
-          kaggle --version
-          # quick authenticated call:
-          kaggle datasets list -p 1 >/dev/null
-
-      - name: Seed empty CSVs if missing (first run safety)
+      - name: Seed empty CSVs if missing (first-run safety)
         run: |
           set -euxo pipefail
           python - <<'PY'
@@ -84,27 +42,30 @@ jobs:
                           "minutes","points","reboundsTotal","assists","steals","blocks","turnovers",
                           "fieldGoalsMade","fieldGoalsAttempted","threePointersMade","threePointersAttempted",
                           "freeThrowsMade","freeThrowsAttempted","plusMinus","didNotPlay","notPlayingReason"]
+          team_cols = ["gameId","teamId","teamTricode","teamCity","teamName","opponentTeamId","home","win",
+                       "points","reboundsTotal","assists","steals","blocks","turnovers",
+                       "fieldGoalsMade","fieldGoalsAttempted","threePointersMade","threePointersAttempted",
+                       "freeThrowsMade","freeThrowsAttempted"]
           ensure('export/games.csv', games_cols)
           ensure('export/player_stats.csv', players_cols)
+          ensure('export/team_stats.csv', team_cols)
           PY
 
-      - name: Compile Python (catches syntax errors)
-        run: |
-          set -euxo pipefail
-          python -m compileall -q src
-
-      - name: Ingest latest NBA data
+      - name: Ingest latest NBA data (yesterday + today by default)
         env:
           USE_PARQUET: "0"
+          # Optional one-off backfill examples (uncomment one):
+          # START_DATE: "2025-01-10"
+          # END_DATE:   "2025-01-17"
+          # DAYS_BACK:  "30"
         run: |
           set -euxo pipefail
           python src/ingest.py
-          echo "Head of export/games.csv:"
+          echo "Preview files:"
+          ls -lh export || true
           head -n 5 export/games.csv || true
-          echo "Head of export/player_stats.csv:"
+          head -n 5 export/team_stats.csv || true
           head -n 5 export/player_stats.csv || true
-          echo "Export dir listing:"
-          ls -lh export
 
       - name: Patch dataset owner in metadata to your Kaggle handle
         env:
@@ -112,8 +73,20 @@ jobs:
         run: |
           set -euxo pipefail
           sed -i -E "s/\"id\": \"[^\"]*\\/nba-daily-updates\"/\"id\": \"${KAGGLE_USERNAME//\//\\/}\\/nba-daily-updates\"/g" dataset-metadata.json
-          echo "metadata now:"
+          echo "metadata:"
           cat dataset-metadata.json
+
+      - name: Configure Kaggle CLI credentials
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          set -euxo pipefail
+          mkdir -p ~/.kaggle
+          printf '{"username":"%s","key":"%s"}\n' "$KAGGLE_USERNAME" "$KAGGLE_KEY" > ~/.kaggle/kaggle.json
+          chmod 600 ~/.kaggle/kaggle.json
+          kaggle --version
+          kaggle datasets list -p 1 >/dev/null
 
       - name: Create or version Kaggle dataset
         env:
