@@ -3,11 +3,11 @@
 Beginner-friendly NBA ingest script (no database).
 - Fetches today's and yesterday's games from NBA public JSON endpoints.
 - Writes/updates export/games.csv and export/player_stats.csv.
-- Idempotent: dedupes by (gameId, teamId) for team lines and (gameId, playerId) for players.
+- Idempotent: dedupes by (gameId) for games and (gameId, playerId) for players.
 
 Notes:
-- Uses the NBA "liveData" CDN endpoints which are generally accessible without special headers.
-- If these endpoints change in the future, see the "Adjust parsing here" comments below.
+- Uses the NBA "liveData" CDN endpoints.
+- If these endpoints change, see the "Adjust parsing here" comments.
 """
 
 from __future__ import annotations
@@ -15,16 +15,19 @@ import csv
 import os
 import sys
 import time
-import json
-from dataclasses import dataclass
-from typing import Dict, Any, List, Tuple
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo  # built-in since Python 3.9
+from typing import Dict, Any, List
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo  # Python 3.9+
 import requests
 import pandas as pd
 
+# Use a browser-like User-Agent to avoid occasional 403s
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari"
+}
+
 ET = ZoneInfo("America/New_York")
-EXPORT_DIR = os.path.join(os.path.dirname(__file__), "..", "export")
+EXPORT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "export"))
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
 GAMES_CSV = os.path.join(EXPORT_DIR, "games.csv")
@@ -43,20 +46,18 @@ def date_yyyymmdd(d):
 def get_scoreboard_for_date(d) -> Dict[str, Any]:
     """
     Try date-specific scoreboard first; if it's today, also try today's generic endpoint.
-    We handle 404s gracefully and return {} on failure.
+    Return {} on failure.
     """
     ymd = date_yyyymmdd(d)
     candidates = [
-        # Date-specific endpoint (preferred)
         f"https://cdn.nba.com/static/json/liveData/scoreboard/scoreboard_{ymd}.json",
     ]
-    # If the date is today, also try the generic "today" endpoint
     if d == et_now_date():
         candidates.append("https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json")
 
     for url in candidates:
         try:
-            r = requests.get(url, timeout=20)
+            r = requests.get(url, timeout=20, headers=HEADERS)
             if r.status_code == 200:
                 return r.json()
         except Exception as e:
@@ -69,7 +70,7 @@ def get_boxscore_for_game(game_id: str) -> Dict[str, Any]:
     """
     url = f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
     try:
-        r = requests.get(url, timeout=20)
+        r = requests.get(url, timeout=20, headers=HEADERS)
         if r.status_code == 200:
             return r.json()
     except Exception as e:
@@ -82,8 +83,7 @@ def ensure_csv(path: str, columns: List[str]):
     """
     if not os.path.exists(path):
         with open(path, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(columns)
+            csv.writer(f).writerow(columns)
 
 def upsert_csv(path: str, df_new: pd.DataFrame, dedupe_keys: List[str]):
     """
@@ -99,9 +99,11 @@ def upsert_csv(path: str, df_new: pd.DataFrame, dedupe_keys: List[str]):
     df_all.to_csv(path, index=False)
 
     if USE_PARQUET:
-        # Optional Parquet mirror for faster reads locally
-        pq_path = os.path.splitext(path)[0] + ".parquet"
-        df_all.to_parquet(pq_path, index=False)
+        try:
+            pq_path = os.path.splitext(path)[0] + ".parquet"
+            df_all.to_parquet(pq_path, index=False)
+        except Exception as e:
+            print(f"[warn] parquet write skipped: {e}", file=sys.stderr)
 
 # ---------- Main ingest ----------
 
@@ -138,7 +140,6 @@ def collect_from_scoreboard(sb_json: Dict[str, Any]) -> List[Dict[str, Any]]:
             "awayTeamTricode": away.get("teamTricode"),
             "awayScore": away.get("score"),
         })
-        # Skip malformed games
         if not game["gameId"]:
             continue
         games.append(game)
@@ -158,16 +159,13 @@ def collect_players_from_boxscore(bs_json: Dict[str, Any]) -> List[Dict[str, Any
     players = box.get("players", []) or []
     game_id = game.get("gameId")
 
-    # Some fields live at team-level; we’ll pull teamId per player from 'teamTricode' match if needed.
     teams = {t.get("teamTricode"): t for t in box.get("teams", [])} if isinstance(box.get("teams", []), list) else {}
 
     for p in players:
-        # Each p has basic stats; many are strings "0" or "12"
         team_tricode = p.get("teamTricode")
-        teamId = None
-        if team_tricode and team_tricode in teams:
-            teamId = teams[team_tricode].get("teamId")
+        teamId = teams.get(team_tricode, {}).get("teamId") if team_tricode in teams else None
 
+        stats = p.get("statistics", {}) or {}
         row = {
             "gameId": game_id,
             "playerId": p.get("personId"),
@@ -177,21 +175,20 @@ def collect_players_from_boxscore(bs_json: Dict[str, Any]) -> List[Dict[str, Any
             "familyName": p.get("familyName"),
             "jerseyNum": p.get("jerseyNum"),
             "position": p.get("position"),
-            # Basic boxscore fields (strings -> we keep as-is to avoid parse errors)
-            "minutes": p.get("statistics", {}).get("minutes"),
-            "points": p.get("statistics", {}).get("points"),
-            "reboundsTotal": p.get("statistics", {}).get("reboundsTotal"),
-            "assists": p.get("statistics", {}).get("assists"),
-            "steals": p.get("statistics", {}).get("steals"),
-            "blocks": p.get("statistics", {}).get("blocks"),
-            "turnovers": p.get("statistics", {}).get("turnovers"),
-            "fieldGoalsMade": p.get("statistics", {}).get("fieldGoalsMade"),
-            "fieldGoalsAttempted": p.get("statistics", {}).get("fieldGoalsAttempted"),
-            "threePointersMade": p.get("statistics", {}).get("threePointersMade"),
-            "threePointersAttempted": p.get("statistics", {}).get("threePointersAttempted"),
-            "freeThrowsMade": p.get("statistics", {}).get("freeThrowsMade"),
-            "freeThrowsAttempted": p.get("statistics", {}).get("freeThrowsAttempted"),
-            "plusMinus": p.get("statistics", {}).get("plusMinusPoints"),
+            "minutes": stats.get("minutes"),
+            "points": stats.get("points"),
+            "reboundsTotal": stats.get("reboundsTotal"),
+            "assists": stats.get("assists"),
+            "steals": stats.get("steals"),
+            "blocks": stats.get("blocks"),
+            "turnovers": stats.get("turnovers"),
+            "fieldGoalsMade": stats.get("fieldGoalsMade"),
+            "fieldGoalsAttempted": stats.get("fieldGoalsAttempted"),
+            "threePointersMade": stats.get("threePointersMade"),
+            "threePointersAttempted": stats.get("threePointersAttempted"),
+            "freeThrowsMade": stats.get("freeThrowsMade"),
+            "freeThrowsAttempted": stats.get("freeThrowsAttempted"),
+            "plusMinus": stats.get("plusMinusPoints"),
             "didNotPlay": p.get("didNotPlay"),
             "notPlayingReason": p.get("notPlayingReason"),
         }
@@ -214,8 +211,7 @@ def main():
 
     print(f"[info] total games discovered: {len(all_games)}")
 
-    # Write/merge team-level lines into games.csv
-    # We keep one line per game with core info (home/away + scores).
+    # Persist games
     if all_games:
         games_df = pd.DataFrame(all_games)
         ensure_csv(GAMES_CSV, list(games_df.columns))
@@ -223,7 +219,7 @@ def main():
     else:
         print("[warn] no games found for the target dates")
 
-    # For each game, fetch player boxscore and merge into player_stats.csv
+    # Collect players per game
     all_players: List[Dict[str, Any]] = []
     for g in all_games:
         gid = g.get("gameId")
@@ -233,8 +229,7 @@ def main():
         rows = collect_players_from_boxscore(bs)
         print(f"[info] game {gid}: {len(rows)} player rows")
         all_players.extend(rows)
-        # be a good API citizen
-        time.sleep(0.4)
+        time.sleep(0.4)  # gentle pacing
 
     if all_players:
         players_df = pd.DataFrame(all_players)
