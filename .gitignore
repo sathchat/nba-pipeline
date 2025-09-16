@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Env & secrets
+.env
+kaggle.json
+
+# Data outputs
+export/*.zip
+export/*.parquet
+
+# OS/editor
+.DS_Store
+Thumbs.db
