@@ -2,11 +2,11 @@ name: Update NBA dataset and publish to Kaggle
 
 on:
   schedule:
-    - cron: "0 12 * * *"    # 12:00 UTC daily (08:00 America/New_York)
+    - cron: "0 12 * * *"    # daily 12:00 UTC (~08:00 America/New_York)
   workflow_dispatch:
     inputs:
       smoketest:
-        description: "Run one-off smoketest (does NOT affect daily schedule)"
+        description: "Run a known in-season window and print counts"
         required: false
         default: "false"
       start:
@@ -61,7 +61,7 @@ jobs:
           ensure('export/team_stats.csv', team_cols)
           PY
 
-      # ---------- optional smoketest for manual runs ----------
+      # ---------- ONE-TIME: run this from the UI with smoketest=true ----------
       - name: Smoketest (known in-season window)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoketest == 'true' }}
         env:
@@ -70,9 +70,8 @@ jobs:
         run: |
           set -euxo pipefail
           python src/ingest.py
-          echo "Line counts:"
+          echo "Line counts (should be >1 each):"
           wc -l export/games.csv export/team_stats.csv export/player_stats.csv || true
-          echo "Heads:"
           head -n 5 export/games.csv || true
           head -n 5 export/team_stats.csv || true
           head -n 5 export/player_stats.csv || true
@@ -105,15 +104,6 @@ jobs:
             echo "has_data=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Patch dataset owner in metadata
-        if: ${{ steps.check.outputs.has_data == 'true' }}
-        env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-        run: |
-          set -euxo pipefail
-          sed -i -E "s/\"id\": \"[^\"]*\\/nba-daily-updates\"/\"id\": \"${KAGGLE_USERNAME//\//\\/}\\/nba-daily-updates\"/g" dataset-metadata.json
-          cat dataset-metadata.json
-
       - name: Configure Kaggle CLI
         if: ${{ steps.check.outputs.has_data == 'true' }}
         env:
@@ -125,27 +115,35 @@ jobs:
           printf '{"username":"%s","key":"%s"}\n' "$KAGGLE_USERNAME" "$KAGGLE_KEY" > ~/.kaggle/kaggle.json
           chmod 600 ~/.kaggle/kaggle.json
           kaggle --version
-          kaggle datasets list -p 1 > /dev/null
+          echo "Using Kaggle owner: $KAGGLE_USERNAME"
+          echo "Searching for dataset by owner+slug:"
+          kaggle datasets list -o "$KAGGLE_USERNAME" -s "nba-daily-updates" -p 1 || true
 
-      - name: Create or version Kaggle dataset
+      - name: Patch dataset owner in metadata to your Kaggle handle
+        if: ${{ steps.check.outputs.has_data == 'true' }}
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        run: |
+          set -euxo pipefail
+          sed -i -E "s/\"id\": \"[^\"]*\\/nba-daily-updates\"/\"id\": \"${KAGGLE_USERNAME//\//\\/}\\/nba-daily-updates\"/g" dataset-metadata.json
+          cat dataset-metadata.json
+
+      - name: Create or version Kaggle dataset (only when data exists)
         if: ${{ steps.check.outputs.has_data == 'true' }}
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
           set -euxo pipefail
           DS="${KAGGLE_USERNAME}/nba-daily-updates"
+          # Only package files referenced in dataset-metadata.json; .kaggleignore filters others
           if kaggle datasets status "$DS" > /dev/null 2>&1; then
             kaggle datasets version -p . -m "Daily update" -r zip --dir-mode zip
           else
-            kaggle datasets create -p .
+            # Use --public if you want it visible without logging in
+            kaggle datasets create -p . --public
           fi
+          echo "Dataset URL: https://www.kaggle.com/datasets/$KAGGLE_USERNAME/nba-daily-updates"
 
-      - name: Show Kaggle URL (or explain skip)
-        env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-        run: |
-          if [ "${{ steps.check.outputs.has_data }}" = "true" ]; then
-            echo "https://www.kaggle.com/datasets/$KAGGLE_USERNAME/nba-daily-updates"
-          else
-            echo "No data collected for this run (likely off-season or API outage). Skipping Kaggle publish."
-          fi
+      - name: Explain skip
+        if: ${{ steps.check.outputs.has_data != 'true' }}
+        run: echo "Skip publish: no data collected (off-season window, API outage, or wrong dates)."
