@@ -6,12 +6,12 @@ on:
 jobs:
   backfill:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Python setup
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -23,7 +23,7 @@ jobs:
           pip install -r requirements.txt
           pip install kaggle
 
-      - name: Configure Kaggle CLI credentials
+      - name: Configure Kaggle CLI
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
@@ -34,7 +34,7 @@ jobs:
           chmod 600 ~/.kaggle/kaggle.json
           kaggle --version
 
-      - name: Prepare export folder and pull current Kaggle CSVs (if any)
+      - name: Prime export (pull latest from Kaggle if exists)
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
@@ -42,7 +42,6 @@ jobs:
           mkdir -p export
           DS="${KAGGLE_USERNAME}/nba-daily-updates"
           if kaggle datasets status "$DS" >/dev/null 2>&1; then
-            echo "Dataset exists; downloading latest CSVs…"
             rm -rf prev && mkdir -p prev
             kaggle datasets download -d "$DS" -p prev --unzip
             [ -f prev/export/games.csv ] && cp -f prev/export/games.csv export/games.csv || true
@@ -86,16 +85,32 @@ jobs:
             END="$((YEAR+1))-07-01"
             echo "=== Season ${YEAR}-${YEAR+1}: ${START}..${END} ==="
             START_DATE="$START" END_DATE="$END" python src/ingest.py
+
+            gc=$( wc -l < export/games.csv )
+            tc=$( wc -l < export/team_stats.csv )
+            pc=$( wc -l < export/player_stats.csv )
+            echo "Cumulative line counts: games=$gc team=$tc players=$pc"
+
             COUNT=$((COUNT+1))
             if [ $((COUNT % 3)) -eq 0 ]; then
-              echo "Checkpointing to Kaggle…"
-              kaggle datasets status "$DS" >/dev/null 2>&1 && \
-                kaggle datasets version -p . -m "Backfill checkpoint through ${YEAR}-${YEAR+1}" -r zip --dir-mode zip \
-              || kaggle datasets create -p .
+              echo "Checkpointing to Kaggle (every 3 seasons) ..."
+              # Only publish if files have >1 line each
+              if [ "$gc" -gt 1 ] && [ "$tc" -gt 1 ] && [ "$pc" -gt 1 ]; then
+                kaggle datasets status "$DS" >/dev/null 2>&1 && \
+                  kaggle datasets version -p . -m "Backfill checkpoint through ${YEAR}-${YEAR+1}" -r zip --dir-mode zip \
+                || kaggle datasets create -p .
+              else
+                echo "Skipping checkpoint: still looks empty."
+              fi
             fi
           done
           echo "Final Kaggle version after all seasons…"
-          kaggle datasets version -p . -m "Backfill complete: last 15 seasons" -r zip --dir-mode zip
+          gc=$( wc -l < export/games.csv ); tc=$( wc -l < export/team_stats.csv ); pc=$( wc -l < export/player_stats.csv )
+          if [ "$gc" -gt 1 ] && [ "$tc" -gt 1 ] && [ "$pc" -gt 1 ]; then
+            kaggle datasets version -p . -m "Backfill complete: last 15 seasons" -r zip --dir-mode zip
+          else
+            echo "Final skip: files still empty."
+          fi
 
       - name: Show Kaggle dataset URL
         env:
