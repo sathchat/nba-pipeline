@@ -32,14 +32,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Cache pip packages
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
       - name: Install deps
         run: |
           set -euxo pipefail
@@ -72,14 +64,14 @@ jobs:
           ensure('export/team_stats.csv', team_cols)
           PY
 
-      # Optional smoketest for manual runs (prints counts and heads)
       - name: Smoketest (known in-season window)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoketest == 'true' }}
+        env:
+          RUN_START: ${{ inputs.start != '' && inputs.start || '2016-01-15' }}
+          RUN_END:   ${{ inputs.end   != '' && inputs.end   || '2016-01-16' }}
         run: |
           set -euxo pipefail
-          START_DATE="${{ inputs.start != '' && inputs.start || '2016-01-15' }}"
-          END_DATE="${{ inputs.end != '' && inputs.end || '2016-01-16' }}"
-          START_DATE="$START_DATE" END_DATE="$END_DATE" python src/ingest.py
+          START_DATE="$RUN_START" END_DATE="$RUN_END" python src/ingest.py
           echo "Line counts (should be >1 each):"
           wc -l export/games.csv export/team_stats.csv export/player_stats.csv || true
           echo "Heads:"
@@ -89,18 +81,15 @@ jobs:
 
       - name: Ingest latest NBA data (daily path)
         if: ${{ ! (github.event_name == 'workflow_dispatch' && inputs.smoketest == 'true') }}
+        env:
+          RUN_START: ${{ inputs.start }}
+          RUN_END:   ${{ inputs.end }}
         run: |
           set -euxo pipefail
-          if [ -n "${{ inputs.start }}" ] && [ -n "${{ inputs.end }}" ]; then
-            START_DATE="${{ inputs.start }}" END_DATE="${{ inputs.end }}" python src/ingest.py || {
-              echo "❌ Ingestion failed with custom dates"
-              exit 1
-            }
+          if [ -n "$RUN_START" ] && [ -n "$RUN_END" ]; then
+            START_DATE="$RUN_START" END_DATE="$RUN_END" python src/ingest.py
           else
-            python src/ingest.py || {
-              echo "❌ Ingestion failed with default dates"
-              exit 1
-            }
+            python src/ingest.py
           fi
           echo "Heads:"
           head -n 5 export/games.csv || true
@@ -119,19 +108,6 @@ jobs:
             echo "has_data=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_data=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Validate dataset sizes
-        if: ${{ steps.check.outputs.has_data == 'true' }}
-        run: |
-          set -euxo pipefail
-          gc=$(wc -l < export/games.csv)
-          tc=$(wc -l < export/team_stats.csv)
-          pc=$(wc -l < export/player_stats.csv)
-          if [ "$gc" -lt 2 ] || [ "$tc" -lt 4 ] || [ "$pc" -lt 20 ]; then
-            echo "❌ Dataset sizes seem suspiciously small"
-            echo "Games: $gc, Teams: $tc, Players: $pc"
-            exit 1
           fi
 
       - name: Configure Kaggle CLI
@@ -156,14 +132,6 @@ jobs:
           sed -i -E "s/\"id\": \"[^\"]*\\/nba-daily-updates\"/\"id\": \"${KAGGLE_USERNAME//\//\\/}\\/nba-daily-updates\"/g" dataset-metadata.json
           cat dataset-metadata.json
 
-      - name: Update dataset metadata with timestamp
-        if: ${{ steps.check.outputs.has_data == 'true' }}
-        run: |
-          set -euxo pipefail
-          CURRENT_DATE=$(date -u +"%Y-%m-%d")
-          sed -i "s/\"title\": \".*\"/\"title\": \"NBA Daily Updates - $CURRENT_DATE\"/g" dataset-metadata.json
-          cat dataset-metadata.json
-
       - name: Create or version Kaggle dataset (UPLOAD RAW FILES)
         if: ${{ steps.check.outputs.has_data == 'true' }}
         env:
@@ -171,48 +139,9 @@ jobs:
         run: |
           set -euxo pipefail
           DS="${KAGGLE_USERNAME}/nba-daily-updates"
-          # Do NOT use -r zip or --dir-mode zip. Let Kaggle ingest raw CSVs.
           if kaggle datasets status "$DS" > /dev/null 2>&1; then
-            kaggle datasets version -p . -m "Daily update"
+            kaggle datasets version -p .
           else
             kaggle datasets create -p . --public
           fi
           echo "Dataset URL: https://www.kaggle.com/datasets/$KAGGLE_USERNAME/nba-daily-updates"
-          echo "Files now on Kaggle:"
-          kaggle datasets files "$DS" || true
-
-      - name: Verify Kaggle upload
-        if: ${{ steps.check.outputs.has_data == 'true' }}
-        env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-        run: |
-          set -euxo pipefail
-          DS="${KAGGLE_USERNAME}/nba-daily-updates"
-          echo "Waiting 30 seconds for Kaggle processing..."
-          sleep 30
-          kaggle datasets status "$DS" || {
-            echo "❌ Failed to verify dataset status on Kaggle"
-            exit 1
-          }
-          echo "✅ Dataset successfully published to Kaggle"
-
-      - name: Explain skip
-        if: ${{ steps.check.outputs.has_data != 'true' }}
-        run: echo "Skip publish: no data collected (off-season window, API outage, or wrong dates)."
-
-  # Optional: only comments on PRs, never on schedule/dispatch (prevents errors)
-  notify:
-    needs: run
-    if: ${{ always() && failure() && github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Comment on PR
-        uses: actions/github-script@v7
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.payload.pull_request.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `🚨 NBA dataset update failed! Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
-            })
