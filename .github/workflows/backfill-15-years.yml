@@ -74,7 +74,7 @@ jobs:
       - name: Compile Python
         run: python -m compileall -q src
 
-      - name: Backfill seasons with checkpoints
+      - name: Backfill seasons with checkpoints (no zip)
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
@@ -92,9 +92,13 @@ jobs:
             if [ $((COUNT % 3)) -eq 0 ]; then
               echo "Checkpointing to Kaggle (every 3 seasons) ..."
               if [ "$gc" -gt 1 ] && [ "$tc" -gt 1 ] && [ "$pc" -gt 1 ]; then
-                kaggle datasets status "$DS" >/dev/null 2>&1 && \
-                  kaggle datasets version -p . -m "Backfill checkpoint through ${YEAR}-${YEAR+1}" -r zip --dir-mode zip \
-                || kaggle datasets create -p . --public
+                if kaggle datasets status "$DS" >/dev/null 2>&1; then
+                  kaggle datasets version -p . -m "Backfill checkpoint through ${YEAR}-${YEAR+1}"
+                else
+                  kaggle datasets create -p . --public
+                fi
+                echo "Files now on Kaggle (after checkpoint):"
+                kaggle datasets files "$DS" || true
               else
                 echo "Skipping checkpoint: still looks empty."
               fi
@@ -103,12 +107,8 @@ jobs:
           echo "Final Kaggle version after all seasons…"
           gc=$( wc -l < export/games.csv ); tc=$( wc -l < export/team_stats.csv ); pc=$( wc -l < export/player_stats.csv )
           if [ "$gc" -gt 1 ] && [ "$tc" -gt 1 ] && [ "$pc" -gt 1 ]; then
-            kaggle datasets version -p . -m "Backfill complete: last 15 seasons" -r zip --dir-mode zip
+            kaggle datasets version -p . -m "Backfill complete: last 15 seasons"
           else
             echo "Final skip: files still empty."
           fi
-
-      - name: Show Kaggle dataset URL
-        env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-        run: echo "https://www.kaggle.com/datasets/$KAGGLE_USERNAME/nba-daily-updates"
+          echo "Dataset URL: https://www.kaggle.com/datasets/$KAGGLE_USERNAME/nba-daily-updates"
