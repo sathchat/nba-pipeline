@@ -1,0 +1,5 @@
+# ignore everything by default
+*
+# allow only these paths
+!dataset-metadata.json
+!export/**
