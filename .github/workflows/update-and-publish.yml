@@ -21,7 +21,7 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 45  # Increased for potential Kaggle delays
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -122,13 +122,12 @@ jobs:
           fi
 
       - name: Validate dataset sizes
-        if: steps.check.outputs.has_data == 'true'
+        if: ${{ steps.check.outputs.has_data == 'true' }}
         run: |
           set -euxo pipefail
           gc=$(wc -l < export/games.csv)
           tc=$(wc -l < export/team_stats.csv)
           pc=$(wc -l < export/player_stats.csv)
-          
           if [ "$gc" -lt 2 ] || [ "$tc" -lt 4 ] || [ "$pc" -lt 20 ]; then
             echo "❌ Dataset sizes seem suspiciously small"
             echo "Games: $gc, Teams: $tc, Players: $pc"
@@ -136,7 +135,7 @@ jobs:
           fi
 
       - name: Configure Kaggle CLI
-        if: steps.check.outputs.has_data == 'true'
+        if: ${{ steps.check.outputs.has_data == 'true' }}
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
@@ -149,7 +148,7 @@ jobs:
           echo "Using Kaggle owner: $KAGGLE_USERNAME"
 
       - name: Patch dataset owner in metadata
-        if: steps.check.outputs.has_data == 'true'
+        if: ${{ steps.check.outputs.has_data == 'true' }}
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
@@ -158,7 +157,7 @@ jobs:
           cat dataset-metadata.json
 
       - name: Update dataset metadata with timestamp
-        if: steps.check.outputs.has_data == 'true'
+        if: ${{ steps.check.outputs.has_data == 'true' }}
         run: |
           set -euxo pipefail
           CURRENT_DATE=$(date -u +"%Y-%m-%d")
@@ -166,7 +165,7 @@ jobs:
           cat dataset-metadata.json
 
       - name: Create or version Kaggle dataset (UPLOAD RAW FILES)
-        if: steps.check.outputs.has_data == 'true'
+        if: ${{ steps.check.outputs.has_data == 'true' }}
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
@@ -183,7 +182,9 @@ jobs:
           kaggle datasets files "$DS" || true
 
       - name: Verify Kaggle upload
-        if: steps.check.outputs.has_data == 'true'
+        if: ${{ steps.check.outputs.has_data == 'true' }}
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
           set -euxo pipefail
           DS="${KAGGLE_USERNAME}/nba-daily-updates"
@@ -196,22 +197,22 @@ jobs:
           echo "✅ Dataset successfully published to Kaggle"
 
       - name: Explain skip
-        if: steps.check.outputs.has_data != 'true'
+        if: ${{ steps.check.outputs.has_data != 'true' }}
         run: echo "Skip publish: no data collected (off-season window, API outage, or wrong dates)."
 
+  # Optional: only comments on PRs, never on schedule/dispatch (prevents errors)
   notify:
     needs: run
-    if: always()
+    if: ${{ always() && failure() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Notify on failure
-        if: failure()
-        uses: actions/github-script@v6
+      - name: Comment on PR
+        uses: actions/github-script@v7
         with:
           script: |
             github.rest.issues.createComment({
-              issue_number: context.issue.number,
+              issue_number: context.payload.pull_request.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '🚨 NBA dataset update failed! Check the workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+              body: `🚨 NBA dataset update failed! Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
             })
