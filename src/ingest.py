@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 NBA ingest script with legacy fallback.
-- Recent seasons: cdn.nba.com/static/json/liveData/...
-- Older seasons:  data.nba.net/10s/prod/v1|v2/<YYYYMMDD>/scoreboard.json
-                  data.nba.net/10s/prod/v1|v2/<YYYYMMDD>/<GAMEID>_boxscore.json
+- Recent seasons: https://cdn.nba.com/static/json/liveData/...
+- Older seasons:  https://data.nba.net/10s/prod/v1|v2/<YYYYMMDD>/scoreboard.json
+                  https://data.nba.net/10s/prod/v1|v2/<YYYYMMDD>/<GAMEID>_boxscore.json
 
 Outputs (CSV in export/):
-  games.csv       (one row per game)
-  team_stats.csv  (one row per team per game)
-  player_stats.csv(one row per player per game)
+  games.csv        (one row per game)
+  team_stats.csv   (one row per team per game)
+  player_stats.csv (one row per player per game)
 
 Date control via env:
   START_DATE / END_DATE (YYYY-MM-DD, inclusive)  OR  DAYS_BACK=N
@@ -81,7 +81,7 @@ def fetch_scoreboard(d: date) -> Dict[str, Any] | None:
             js["_source"], js["_ymd"] = "live", ymd
             return js
 
-    # legacy (✅ correct host: data.nba.net)
+    # legacy (correct host: data.nba.net)
     legacy_candidates = [
         f"https://data.nba.net/10s/prod/v1/{ymd}/scoreboard.json",
         f"https://data.nba.net/10s/prod/v2/{ymd}/scoreboard.json",
