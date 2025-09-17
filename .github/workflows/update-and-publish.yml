@@ -2,31 +2,41 @@ name: Update NBA dataset and publish to Kaggle
 
 on:
   schedule:
-    - cron: "0 12 * * *"    # 12:00 UTC daily (8:00 AM America/New_York)
-  workflow_dispatch: {}
+    - cron: "0 12 * * *"    # 12:00 UTC daily (08:00 America/New_York)
+  workflow_dispatch:
+    inputs:
+      smoketest:
+        description: "Run one-off smoketest (does NOT affect daily schedule)"
+        required: false
+        default: "false"
+      start:
+        description: "Optional START_DATE (YYYY-MM-DD) for manual run"
+        required: false
+      end:
+        description: "Optional END_DATE (YYYY-MM-DD) for manual run"
+        required: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 35
     steps:
-      - name: Check out repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install Python dependencies
+      - name: Install deps
         run: |
           set -euxo pipefail
           python -m pip install -U pip
           pip install -r requirements.txt
           pip install kaggle
 
-      - name: Seed empty CSVs if missing (first-run safety)
+      - name: Seed empty CSVs if missing (headers only)
         run: |
           set -euxo pipefail
           python - <<'PY'
@@ -51,32 +61,61 @@ jobs:
           ensure('export/team_stats.csv', team_cols)
           PY
 
-      - name: Ingest latest NBA data (yesterday + today by default)
+      # ---------- optional smoketest for manual runs ----------
+      - name: Smoketest (known in-season window)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.smoketest == 'true' }}
         env:
-          USE_PARQUET: "0"
-          # Optional one-off backfill examples (uncomment one):
-          # START_DATE: "2025-01-10"
-          # END_DATE:   "2025-01-17"
-          # DAYS_BACK:  "30"
+          START_DATE: ${{ inputs.start != '' && inputs.start || '2016-01-15' }}
+          END_DATE:   ${{ inputs.end   != '' && inputs.end   || '2016-01-16' }}
         run: |
           set -euxo pipefail
           python src/ingest.py
-          echo "Preview files:"
-          ls -lh export || true
+          echo "Line counts:"
+          wc -l export/games.csv export/team_stats.csv export/player_stats.csv || true
+          echo "Heads:"
           head -n 5 export/games.csv || true
           head -n 5 export/team_stats.csv || true
           head -n 5 export/player_stats.csv || true
 
-      - name: Patch dataset owner in metadata to your Kaggle handle
+      # ---------- normal ingest (yesterday+today) or manual window ----------
+      - name: Ingest latest NBA data
+        if: ${{ ! (github.event_name == 'workflow_dispatch' && inputs.smoketest == 'true') }}
+        env:
+          START_DATE: ${{ inputs.start }}
+          END_DATE:   ${{ inputs.end }}
+        run: |
+          set -euxo pipefail
+          python src/ingest.py
+          echo "Heads:"
+          head -n 5 export/games.csv || true
+          head -n 5 export/team_stats.csv || true
+          head -n 5 export/player_stats.csv || true
+
+      - name: Check data counts (decide whether to publish)
+        id: check
+        run: |
+          set -euxo pipefail
+          gc=$( [ -f export/games.csv ] && wc -l < export/games.csv || echo 0 )
+          tc=$( [ -f export/team_stats.csv ] && wc -l < export/team_stats.csv || echo 0 )
+          pc=$( [ -f export/player_stats.csv ] && wc -l < export/player_stats.csv || echo 0 )
+          echo "games=$gc team=$tc players=$pc"
+          if [ "$gc" -gt 1 ] && [ "$tc" -gt 1 ] && [ "$pc" -gt 1 ]; then
+            echo "has_data=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_data=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Patch dataset owner in metadata
+        if: ${{ steps.check.outputs.has_data == 'true' }}
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
           set -euxo pipefail
           sed -i -E "s/\"id\": \"[^\"]*\\/nba-daily-updates\"/\"id\": \"${KAGGLE_USERNAME//\//\\/}\\/nba-daily-updates\"/g" dataset-metadata.json
-          echo "metadata:"
           cat dataset-metadata.json
 
-      - name: Configure Kaggle CLI credentials
+      - name: Configure Kaggle CLI
+        if: ${{ steps.check.outputs.has_data == 'true' }}
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
@@ -86,23 +125,27 @@ jobs:
           printf '{"username":"%s","key":"%s"}\n' "$KAGGLE_USERNAME" "$KAGGLE_KEY" > ~/.kaggle/kaggle.json
           chmod 600 ~/.kaggle/kaggle.json
           kaggle --version
-          kaggle datasets list -p 1 >/dev/null
+          kaggle datasets list -p 1 > /dev/null
 
       - name: Create or version Kaggle dataset
+        if: ${{ steps.check.outputs.has_data == 'true' }}
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         run: |
           set -euxo pipefail
           DS="${KAGGLE_USERNAME}/nba-daily-updates"
-          if kaggle datasets status "$DS" >/dev/null 2>&1; then
-            echo "Dataset exists; versioning…"
+          if kaggle datasets status "$DS" > /dev/null 2>&1; then
             kaggle datasets version -p . -m "Daily update" -r zip --dir-mode zip
           else
-            echo "Dataset missing; creating…"
             kaggle datasets create -p .
           fi
 
-      - name: Show Kaggle dataset URL
+      - name: Show Kaggle URL (or explain skip)
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-        run: echo "https://www.kaggle.com/datasets/$KAGGLE_USERNAME/nba-daily-updates"
+        run: |
+          if [ "${{ steps.check.outputs.has_data }}" = "true" ]; then
+            echo "https://www.kaggle.com/datasets/$KAGGLE_USERNAME/nba-daily-updates"
+          else
+            echo "No data collected for this run (likely off-season or API outage). Skipping Kaggle publish."
+          fi
