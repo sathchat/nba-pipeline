@@ -4,8 +4,8 @@
   "licenses": [{ "name": "CC0-1.0" }],
   "description": "Daily-updated NBA games, team totals, and player box scores collected via public NBA JSON endpoints.",
   "resources": [
-    { "path": "export/games.csv",       "description": "Per-game scoreboard lines." },
-    { "path": "export/team_stats.csv",  "description": "Per-team box score totals per game." },
-    { "path": "export/player_stats.csv","description": "Per-player box score lines per game." }
+    { "path": "export/games.csv",        "description": "Per-game scoreboard lines." },
+    { "path": "export/team_stats.csv",   "description": "Per-team box score totals per game." },
+    { "path": "export/player_stats.csv", "description": "Per-player box score lines per game." }
   ]
 }
